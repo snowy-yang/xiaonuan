@@ -10,3 +10,15 @@ dependencies = [
     "textual>=8.2.8",
     "uvicorn[standard]>=0.53.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
+asyncio_mode = "auto"
