@@ -1,0 +1,11 @@
+{
+  "name": "小暖 · AI陪伴",
+  "short_name": "小暖",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f5f7",
+  "theme_color": "#4f6ef7",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

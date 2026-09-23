@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 聊天 (WebSocket)</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#4f6ef7">
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, sans-serif; background: #f4f5f7; display: flex; justify-content: center; }
+  #app { width: 100%; max-width: 640px; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 12px 16px; background: #4f6ef7; color: #fff; font-weight: 600; }
+  #status { font-size: 12px; font-weight: 400; opacity: .85; }
+  #msgs { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 80%; padding: 8px 12px; border-radius: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .user { align-self: flex-end; background: #4f6ef7; color: #fff; border-bottom-right-radius: 4px; }
+  .ai { align-self: flex-start; background: #fff; border-bottom-left-radius: 4px; }
+  .err { align-self: center; color: #c0392b; font-size: 13px; }
+  form { display: flex; gap: 8px; padding: 12px; background: #fff; }
+  input { flex: 1; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; outline: none; }
+  input:focus { border-color: #4f6ef7; }
+  button { padding: 10px 18px; border: 0; border-radius: 8px; background: #4f6ef7; color: #fff; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="lt-panel" style="display:none;position:absolute;top:50px;right:12px;z-index:9;background:#fff;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:10px;width:300px;max-height:60vh;overflow-y:auto;">
+    <div style="font-size:13px;font-weight:600;margin-bottom:6px;">慢信 · 写给未来的自己</div>
+    <div id="lt-list" style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px;"></div>
+    <form id="lt-form" style="display:flex;flex-direction:column;gap:6px;border-top:1px solid #eee;padding-top:8px;">
+      <textarea id="lt-body" rows="4" placeholder="写点想对未来的自己说的话…" style="padding:6px;border:1px solid #ddd;border-radius:6px;font-size:13px;resize:vertical;"></textarea>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <select id="lt-days" style="flex:1;padding:5px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+          <option value="1">1 天后送达</option>
+          <option value="3">3 天后送达</option>
+          <option value="7" selected>7 天后送达</option>
+          <option value="30">30 天后送达</option>
+        </select>
+        <button style="padding:5px 14px;font-size:13px;">寄出</button>
+      </div>
+    </form>
+  </div>
+  <div id="tt-panel" style="display:none;position:absolute;top:50px;right:12px;z-index:9;background:#fff;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:10px;width:300px;max-height:60vh;overflow-y:auto;">
+    <div style="font-size:13px;font-weight:600;margin-bottom:6px;">小暖的时间表</div>
+    <div id="tt-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+    <div id="tt-empty" style="font-size:12px;color:#999;">还空着。聊天里说"每天10点提醒我吃药"，或在下面直接填</div>
+    <form id="tt-form" style="display:flex;flex-direction:column;gap:6px;margin-top:10px;border-top:1px solid #eee;padding-top:8px;">
+      <div style="display:flex;gap:6px;">
+        <input id="tt-time" type="time" required style="flex:1;padding:5px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+        <label style="font-size:12px;display:flex;align-items:center;gap:3px;"><input id="tt-daily" type="checkbox">每天</label>
+      </div>
+      <div style="display:flex;gap:6px;">
+        <input id="tt-text" placeholder="做什么，如：提醒我吃药" required style="flex:1;padding:5px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+        <button style="padding:5px 12px;font-size:13px;">添加</button>
+      </div>
+    </form>
+  </div>
+  <div id="mem-panel" style="display:none;position:absolute;top:50px;right:12px;z-index:9;background:#fff;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.15);padding:10px;width:280px;max-height:50vh;overflow-y:auto;">
+    <div style="font-size:13px;font-weight:600;margin-bottom:6px;">记住的关于你</div>
+    <div id="mem-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+    <div id="mem-empty" style="font-size:12px;color:#999;">还没有记忆，聊天时会自动提取</div>
+    <div style="font-size:13px;font-weight:600;margin:10px 0 6px;">她猜的作息</div>
+    <div id="rt-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+    <div id="rt-empty" style="font-size:12px;color:#999;">聊天里提过日常（如"到学校啦"）后，她会慢慢猜出你的作息</div>
+  </div>
+  <header>AI 聊天 <span id="status">连接中…</span>
+    <button id="lt-btn" style="float:right;padding:2px 10px;font-size:12px;background:rgba(255,255,255,.25);margin-left:6px;">慢信</button>
+    <button id="tt-btn" style="float:right;padding:2px 10px;font-size:12px;background:rgba(255,255,255,.25);margin-left:6px;">时间表</button>
+    <button id="mem-btn" style="float:right;padding:2px 10px;font-size:12px;background:rgba(255,255,255,.25);margin-left:6px;">记忆</button>
+    <button id="new" style="float:right;padding:2px 10px;font-size:12px;background:rgba(255,255,255,.25);">新对话</button>
+  </header>
+  <div id="msgs"></div>
+  <form id="form">
+    <input id="input" placeholder="输入消息，回车发送" autocomplete="off">
+    <button id="send">发送</button>
+  </form>
+</div>
+<script>
+  if ('serviceWorker' in navigator) {
+    addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
+  const msgs = document.getElementById('msgs');
+  const status = document.getElementById('status');
+  const input = document.getElementById('input');
+  const send = document.getElementById('send');
+  const session = localStorage.getItem('chat_session') ||
+    (localStorage.setItem('chat_session', crypto.randomUUID()), localStorage.getItem('chat_session'));
+  let ws, busy = false, aiBubble = null;
+
+  function addMsg(cls, text) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + cls;
+    el.textContent = text;
+    msgs.appendChild(el);
+    msgs.scrollTop = msgs.scrollHeight;
+    return el;
+  }
+
+  function connect() {
+    status.textContent = '连接中…';
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws.onopen = () => { status.textContent = '已连接'; ws.send(JSON.stringify({ type: 'history', session })); };
+    ws.onclose = () => { status.textContent = '已断开，3 秒后重连'; setTimeout(connect, 3000); };
+
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'history') {
+        for (const h of m.items) addMsg(h.role === 'user' ? 'user' : 'ai', h.content);
+      } else if (m.type === 'start') aiBubble = addMsg('ai', '');
+      else if (m.type === 'delta') {
+        aiBubble.textContent += m.text;
+        msgs.scrollTop = msgs.scrollHeight;
+      } else if (m.type === 'error') addMsg('err', m.text);
+      else if (m.type === 'memories') renderMemories(m.items);
+      else if (m.type === 'routines') renderRoutines(m.items);
+      else if (m.type === 'timetable') renderTimetable(m);
+      else if (m.type === 'event') {
+        const when = m.kind === 'alarm' ? '⏰ 叫你起床' : '📌 提醒你';
+        addMsg('ai', `好呀，我记下了：${m.fire_at.replace('T', ' ')} ${when}（${m.text}）`);
+      } else if (m.type === 'proactive') {
+        addMsg('ai', m.text);
+        notify(m.text);
+      } else if (m.type === 'care') {
+        addMsg('ai', m.kind === 'emotion'
+          ? '🫂 嗯，我记在心里了。明天这个时候我来问问你好不好些。'
+          : `好，「${m.note}」这事儿我惦记着！到时候我来问你结果～`);
+      } else if (m.type === 'streak') {
+        addMsg('ai', `🔥 对了，今天是我们连续陪伴的第 ${m.days} 天`);
+      } else if (m.type === 'letter_saved') {
+        addMsg('ai', '✉️ 信我替你收好了，到日子亲手交给你。');
+      } else if (m.type === 'done') { busy = false; send.disabled = false; input.focus(); }
+    };
+  }
+  connect();
+
+  document.getElementById('form').onsubmit = (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || busy || ws.readyState !== 1) return;
+    // 首次发消息时顺手申请系统通知权限（主动消息后台提醒用）
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+    addMsg('user', text);
+    busy = true; send.disabled = true;
+    ws.send(JSON.stringify({ type: 'chat', text, session }));
+    input.value = '';
+  };
+
+  document.getElementById('new').onclick = () => {
+    msgs.innerHTML = '';
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'clear', session }));
+  };
+
+  function renderRoutines(items) {
+    const rtList = document.getElementById('rt-list');
+    document.getElementById('rt-empty').style.display = items.length ? 'none' : 'block';
+    rtList.innerHTML = '';
+    items.forEach((r) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'font-size:13px;display:flex;gap:6px;align-items:center;';
+      const hh = String(Math.floor(r.minute / 60)).padStart(2, '0');
+      const mm = String(r.minute % 60).padStart(2, '0');
+      const how = r.kind === 'explicit' ? '你说的' : `猜的·${r.evidence}次`;
+      row.innerHTML = `<b>${r.label}</b><span style="flex:1">≈ ${hh}:${mm}</span>` +
+        `<span style="color:#999;font-size:11px;">${how}</span>`;
+      rtList.appendChild(row);
+    });
+  }
+
+  function notify(text) {
+    if (document.hidden && 'Notification' in window
+        && Notification.permission === 'granted') {
+      new Notification('小暖', { body: text });
+    }
+  }
+
+  const memPanel = document.getElementById('mem-panel');
+  const memList = document.getElementById('mem-list');
+  const memEmpty = document.getElementById('mem-empty');
+  document.getElementById('mem-btn').onclick = () => {
+    memPanel.style.display = memPanel.style.display === 'none' ? 'block' : 'none';
+    ttPanel.style.display = 'none';
+  };
+
+  const ttPanel = document.getElementById('tt-panel');
+  document.getElementById('tt-btn').onclick = () => {
+    const show = ttPanel.style.display === 'none';
+    ttPanel.style.display = show ? 'block' : 'none';
+    memPanel.style.display = 'none';
+    ltPanel.style.display = 'none';
+    if (show && ws.readyState === 1) ws.send(JSON.stringify({ type: 'timetable', session }));
+  };
+
+  const ltPanel = document.getElementById('lt-panel');
+  document.getElementById('lt-btn').onclick = () => {
+    const show = ltPanel.style.display === 'none';
+    ltPanel.style.display = show ? 'block' : 'none';
+    ttPanel.style.display = 'none';
+    memPanel.style.display = 'none';
+    if (show && ws.readyState === 1) ws.send(JSON.stringify({ type: 'timetable', session }));
+  };
+
+  document.getElementById('lt-form').onsubmit = (e) => {
+    e.preventDefault();
+    const body = document.getElementById('lt-body').value.trim();
+    const days = Number(document.getElementById('lt-days').value);
+    if (!body || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ type: 'write_letter', session, text: body, days }));
+    document.getElementById('lt-body').value = '';
+  };
+
+  function fmtMinute(m) {
+    return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  }
+
+  function renderTimetable(t) {
+    const list = document.getElementById('tt-list');
+    const rows = [];
+    // 她猜的作息
+    for (const r of t.routines || []) {
+      rows.push({ minute: r.minute, label: r.label, tag: r.kind === 'explicit' ? '你说的·每天' : `猜的·每天(${r.evidence})`, color: '#999' });
+    }
+    // 定时任务
+    for (const ev of t.events || []) {
+      const d = new Date(ev.fire_at * 1000);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm2 = String(d.getMinutes()).padStart(2, '0');
+      const tag = ev.repeat === 'daily' ? '你定的·每天'
+        : `${d.getMonth() + 1}/${d.getDate()} ${ev.kind === 'alarm' ? '叫早' : '提醒'}`;
+      rows.push({ minute: d.getHours() * 60 + d.getMinutes(), label: ev.text, tag, color: '#4f6ef7' });
+    }
+    // 她惦记的事（情绪回访 / 承诺追踪）
+    for (const c of t.care || []) {
+      const d = new Date(c.due_at * 1000);
+      const tag = (c.kind === 'emotion' ? '惦记你' : '等你消息') +
+        ` ${d.getMonth() + 1}/${d.getDate()}`;
+      rows.push({ minute: d.getHours() * 60 + d.getMinutes(), label: c.note, tag, color: '#e67e22' });
+    }
+    // 未拆的慢信
+    for (const l of t.letters || []) {
+      const d = new Date(l.deliver_at * 1000);
+      rows.push({ minute: d.getHours() * 60 + d.getMinutes(), label: '✉️ ' + l.body.slice(0, 20) + '…', tag: `慢信 ${d.getMonth() + 1}/${d.getDate()} 拆`, color: '#8e44ad' });
+    }
+    rows.sort((a, b) => a.minute - b.minute);
+    document.getElementById('tt-empty').style.display = rows.length ? 'none' : 'block';
+    list.innerHTML = '';
+    for (const r of rows) {
+      const row = document.createElement('div');
+      row.style.cssText = 'font-size:13px;display:flex;gap:8px;align-items:baseline;';
+      row.innerHTML = `<b style="color:${r.color};flex-shrink:0">${fmtMinute(r.minute)}</b>` +
+        `<span style="flex:1">${escapeHtml(r.label)}</span>` +
+        `<span style="color:#999;font-size:11px;flex-shrink:0;">${r.tag}</span>`;
+      list.appendChild(row);
+    }
+    // 慢信面板的待达列表
+    const ltList = document.getElementById('lt-list');
+    ltList.innerHTML = '';
+    for (const l of t.letters || []) {
+      const d = new Date(l.deliver_at * 1000);
+      const row = document.createElement('div');
+      row.style.cssText = 'font-size:12px;color:#666;';
+      row.textContent = `✉️ ${d.getMonth() + 1}/${d.getDate()} 送达：「${l.body.slice(0, 14)}…」`;
+      ltList.appendChild(row);
+    }
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  document.getElementById('tt-form').onsubmit = (e) => {
+    e.preventDefault();
+    const time = document.getElementById('tt-time').value;
+    const text = document.getElementById('tt-text').value.trim();
+    if (!time || !text || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({
+      type: 'add_event', session, time, text,
+      repeat: document.getElementById('tt-daily').checked,
+    }));
+    document.getElementById('tt-text').value = '';
+  };
+
+  function renderMemories(items) {
+    memList.innerHTML = '';
+    memEmpty.style.display = items.length ? 'none' : 'block';
+    items.forEach((m, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:13px;';
+      const span = document.createElement('span');
+      span.style.flex = '1';
+      span.textContent = m.text;
+      const del = document.createElement('button');
+      del.textContent = '×';
+      del.title = '忘记这条';
+      del.style.cssText = 'padding:0 6px;font-size:13px;background:#eee;color:#c0392b;border-radius:6px;';
+      del.onclick = () => ws.send(JSON.stringify({ type: 'forget', id: m.id, session }));
+      row.appendChild(span); row.appendChild(del);
+      memList.appendChild(row);
+    });
+  }
+</script>
+</body>
+</html>
