@@ -16,8 +16,10 @@ pytestmark = pytest.mark.skipif(
     reason="未配置 PG_DSN，跳过 PG 集成测试")
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def conn():
+    """每个测试独立的连接池：pytest-asyncio 默认每个测试一个新事件循环，
+    连接池必须建在当前循环里，否则 asyncpg 会报 attached to a different loop"""
     await db.init(os.environ["PG_DSN"].strip())
     yield
     await db.close()
