@@ -141,5 +141,6 @@ async def test_memory_from_days_ago(conn):
     await db.add_message(s, "user", "半个月前的话")
     rows = await db.memory_from_days_ago(s, 15, time.time())
     assert rows == []  # 刚插入的不在 15 天前
-    rows = await db.memory_from_days_ago(s, 0, time.time() + 86400)
+    # days=0 的窗口是 [now_ts, now_ts+86400]，now_ts 用现在即可罩住刚插入的
+    rows = await db.memory_from_days_ago(s, 0, time.time())
     assert any(r["content"] == "半个月前的话" for r in rows)
