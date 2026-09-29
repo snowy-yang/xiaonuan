@@ -76,7 +76,7 @@ def test_streak_increments(fdb, offline):
         async def send_json(self, payload):
             pass
 
-    asyncio.run(main.remember_later(FakeWS(), "s1", "我来了", sig))
+    asyncio.run(main.remember_later(FakeWS().send_json, "s1", "我来了", sig))
     assert asyncio.run(fdb.get_meta("s1", "streak")) == "4"
 
 
@@ -89,5 +89,5 @@ def test_streak_resets_after_gap(fdb, offline):
         async def send_json(self, payload):
             pass
 
-    asyncio.run(main.remember_later(FakeWS(), "s1", "好久不见", sig))
+    asyncio.run(main.remember_later(FakeWS().send_json, "s1", "好久不见", sig))
     assert asyncio.run(fdb.get_meta("s1", "streak")) == "1"

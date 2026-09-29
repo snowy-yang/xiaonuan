@@ -297,8 +297,11 @@ def offline(monkeypatch):
 @pytest.fixture
 def client(offline, fdb):
     """不带 lifespan 的测试应用（绕过 PG 连接）"""
+    from app import onebot
+
     app = FastAPI()
     app.websocket("/ws")(main.chat)
+    app.include_router(onebot.router)
     return TestClient(app)
 
 

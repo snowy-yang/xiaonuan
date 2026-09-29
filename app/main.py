@@ -27,6 +27,7 @@ from . import db, tools
 from .connector import (ASSISTANT_NAME, ASSISTANT_PERSONA, API_KEY,
                         BATCH_CONFIGURED, complete, complete_night, embed,
                         route, run_model_tools)
+from .onebot import router as onebot_router, send_to_session
 
 load_dotenv()
 
@@ -70,6 +71,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(onebot_router)
 
 # 当前在线的连接：session -> {ws, ...}，用于主动消息推送
 connected: dict[str, set[WebSocket]] = {}
@@ -91,20 +93,61 @@ def _daily_slot(session: str, key: str, lo: int, hi: int, today: str) -> int:
     return lo + h % (hi - lo)
 
 
+async def chat_turn(session: str, text: str, notify) -> str:
+    """一次完整对话回合（TUI WS 与 OneBot 适配器共用）：
+    路由 → 分支 → 生成回复 → 落库 → 后台提取。返回完整回复文本。"""
+    sig = await route(text, datetime.now(),
+                      [m["text"] for m in await db.get_memories(session)])
+    await db.add_message(session, "user", text)
+    full = ""
+    try:
+        if sig.get("letter"):
+            days, lbody = sig["letter"]
+            if days == "ask":
+                full = ("想给未来的自己留封信呀。完整地跟我说一句："
+                        "「给7天后的自己写信：<想说的话>」，我替你收着。")
+            else:
+                deliver_at = (datetime.now()
+                              + timedelta(days=days)).timestamp()
+                await db.add_letter(session, lbody[:2000], deliver_at)
+                full = f"✉️ 信我替你收好了，{days} 天后亲手交给你。"
+        elif sig.get("view"):
+            full = await compose_view(session, sig["view"])
+        elif not API_KEY:
+            full = f"（回声模式，未配置 AI_API_KEY）你说的是：{text}"
+        else:
+            qvec = (await embed([text]))[0]
+            relevant = await db.search_memories(session, qvec)
+            messages = [{"role": "system",
+                         "content": await system_prompt(session, relevant)}]
+            messages += await db.get_history(session)
+            full = await run_model_tools(
+                messages, tool_executor(session, sig.get("city_hint", "")))
+    except Exception as e:  # 连接器或上游报错，作为一条普通回复返回
+        full = f"（出了点小差错：{e}）"
+    if full:
+        # 注意：助手消息由各传输层在"确认送达"后自己落库
+        # （TUI 发完就记，OneBot 在 retcode==0 后记，避免重复）
+        asyncio.create_task(remember_later(notify, session, text, sig))
+    return full
+
+
 async def push_proactive(session: str, text: str) -> bool:
-    """把主动消息写进历史并推给在线的连接；不在线返回 False"""
+    """主动消息：优先推在线 TUI，OneBot 会话走 QQ；都不在线返回 False"""
     targets = {w for w in connected.get(session, set())
                if w.client_state.name == "CONNECTED"}
-    if not targets:
-        return False
-    await db.add_message(session, "assistant", text)
-    payload = json.dumps({"type": "proactive", "text": text})
-    for w in targets:
-        try:
-            await w.send_text(payload)
-        except Exception:
-            connected.get(session, set()).discard(w)
-    return True
+    if targets:
+        await db.add_message(session, "assistant", text)
+        payload = json.dumps({"type": "proactive", "text": text})
+        for w in targets:
+            try:
+                await w.send_text(payload)
+            except Exception:
+                connected.get(session, set()).discard(w)
+        return True
+    if session.startswith("ob-"):
+        return await send_to_session(session, text)
+    return False
 
 
 async def lore_block(session: str) -> str:
@@ -130,8 +173,7 @@ async def system_prompt(session: str, relevant: list[dict]) -> str:
     return "\n".join(parts)
 
 
-async def remember_later(ws: WebSocket, session: str, text: str,
-                         sig: dict) -> None:
+async def remember_later(notify, session: str, text: str, sig: dict) -> None:
     """后台落库：路由器判出的 记忆/事件/作息/情绪/承诺/身世 + 连续天数"""
     now = datetime.now()
     facts = sig.get("facts") or []
@@ -143,7 +185,7 @@ async def remember_later(ws: WebSocket, session: str, text: str,
 
     async def send(payload: dict) -> None:
         try:
-            await ws.send_json(payload)
+            await notify(payload)
         except Exception:
             pass  # 连接断了，数据已入库，不碍事
 
@@ -231,41 +273,29 @@ async def proactive_text(ev: dict) -> str:
 
 async def deliver_event(ev: dict, ws: WebSocket | None = None) -> bool:
     """推送一次性事件；谁都不在线则保持 pending，等下次上线补发"""
-    targets = ({ws} if ws
-               else {w for w in connected.get(ev["session"], set())
-                     if w.client_state.name == "CONNECTED"})
-    if not targets:
-        return False
     text = await proactive_text(ev)
-    payload = json.dumps({"type": "proactive", "text": text,
-                          "event_id": ev["id"]})
-    for w in targets:
-        try:
-            await w.send_text(payload)
-        except Exception:
-            connected.get(ev["session"], set()).discard(w)
-    await db.add_message(ev["session"], "assistant", text)
-    await db.mark_event_done(ev["id"])
-    return True
+    if ws is not None:  # 补发场景：只发这条连接
+        if ws.client_state.name != "CONNECTED":
+            return False
+        payload = json.dumps({"type": "proactive", "text": text,
+                              "event_id": ev["id"]})
+        await ws.send_text(payload)
+        await db.add_message(ev["session"], "assistant", text)
+        await db.mark_event_done(ev["id"])
+        return True
+    if await push_proactive(ev["session"], text):
+        await db.mark_event_done(ev["id"])
+        return True
+    return False
 
 
 async def deliver_daily_event(ev: dict) -> bool:
     """每日事件到点推送；不在线就保留，下次上线补发"""
-    targets = {w for w in connected.get(ev["session"], set())
-               if w.client_state.name == "CONNECTED"}
-    if not targets:
-        return False
     text = await proactive_text(ev)
-    payload = json.dumps({"type": "proactive", "text": text,
-                          "event_id": ev["id"]})
-    for w in targets:
-        try:
-            await w.send_text(payload)
-        except Exception:
-            connected.get(ev["session"], set()).discard(w)
-    await db.add_message(ev["session"], "assistant", text)
-    await db.mark_event_fired(ev["id"], datetime.now().strftime("%Y-%m-%d"))
-    return True
+    if await push_proactive(ev["session"], text):
+        await db.mark_event_fired(ev["id"], datetime.now().strftime("%Y-%m-%d"))
+        return True
+    return False
 
 
 # ---- 作息问候 ----
@@ -787,7 +817,9 @@ async def scheduler() -> None:
 
 @app.get("/")
 async def index():
-    return {"app": "小暖", "hint": "终端里运行 uv run python tui.py 开始聊天"}
+    return {"app": "小暖",
+            "hint": "终端聊天 uv run python tui.py；"
+                    "OneBot 反向WS /onebot/v11/ws（可带 ?access_token=）"}
 
 
 @app.websocket("/ws")
@@ -926,43 +958,11 @@ async def chat(ws: WebSocket):
             if not text:
                 continue
 
-            # 小模型一次路由：想看哪份档案 / 是不是慢信 / 情绪 / 各类提取
-            sig = await route(text, datetime.now(),
-                              [m["text"] for m in
-                               await db.get_memories(session)])
-            await db.add_message(session, "user", text)
             await ws.send_json({"type": "start"})
-            full = ""
-            try:
-                if sig.get("letter"):
-                    days, lbody = sig["letter"]
-                    if days == "ask":
-                        full = ("想给未来的自己留封信呀。完整地跟我说一句："
-                                "「给7天后的自己写信：<想说的话>」，我替你收着。")
-                    else:
-                        deliver_at = (datetime.now()
-                                      + timedelta(days=days)).timestamp()
-                        await db.add_letter(session, lbody[:2000], deliver_at)
-                        full = f"✉️ 信我替你收好了，{days} 天后亲手交给你。"
-                elif sig.get("view"):
-                    full = await compose_view(session, sig["view"])
-                elif not API_KEY:
-                    full = f"（回声模式，未配置 AI_API_KEY）你说的是：{text}"
-                else:
-                    qvec = (await embed([text]))[0]
-                    relevant = await db.search_memories(session, qvec)
-                    messages = [{"role": "system",
-                                 "content": await system_prompt(session, relevant)}]
-                    messages += await db.get_history(session)
-                    full = await run_model_tools(
-                        messages, tool_executor(session,
-                                                sig.get("city_hint", "")))
-                await send_in_chunks(ws, full)
-            except Exception as e:  # 连接器或上游报错，回传给前端
-                await ws.send_json({"type": "error", "text": str(e)})
+            full = await chat_turn(session, text, ws.send_json)
+            await send_in_chunks(ws, full)
             if full:
                 await db.add_message(session, "assistant", full)
-                asyncio.create_task(remember_later(ws, session, text, sig))
             await ws.send_json({"type": "done"})
     except WebSocketDisconnect:
         pass
